@@ -1,0 +1,601 @@
+---
+title: "Miniproyecto 1: Diversidad Genética + Variables Climáticas"
+subtitle: "Proyecto exploratorio de Delia platura — WorldClim + GenBank"
+date: "2026-18-05"
+---
+
+#¿Existe una asociación entre la diversidad genética (π) de poblaciones de Delia platura y las condiciones climáticas (temperatura media anual, precipitación, estacionalidad) de sus localidades de origen?
+
+## Contexto:
+
+Delia platura es un díptero de la familia Anthomyiidae conocido comúnmente como mosca de la semilla o gusano de la semilla del maíz. Es una plaga esporádica de distribución cosmopolita que ataca las semillas en germinación de numerosos cultivos agronómicos (Capinera, 2008). Morfológicamente es casi idéntica a la mosca de la col (Delia radicum) y a la mosca de la cebolla (Delia antiqua), y resulta especialmente difícil de distinguir de Delia floralis y Delia florilega, por lo que algunos registros de presencia y daño en latitudes altas probablemente corresponden a poblaciones mixtas (Capinera, 2008).
+
+#Origen y distribución La especie es de origen europeo: fue descrita por primera vez en Alemania y, como muchas otras plagas invasoras, alcanzó Norteamérica hacia mediados del siglo XIX y se expandió gradualmente hacia el oeste (Capinera, 2008). En Estados Unidos se ha reportado al menos desde 1855 y hoy se encuentra en todo el territorio estadounidense y es común en el sur de Canadá, llegando incluso a localidades árticas como Yukón y los territorios del Noroeste. Actualmente tiene una distribución global, pero no homogénea: su mayor abundancia se concentra en las regiones templadas del hemisferio norte, aproximadamente entre los 35° y 60° de latitud (Cornell CALS, 2023), y suele estar ausente de los ambientes tropicales (Capinera, 2008).
+
+#Ciclo de vida y dependencia climática
+
+El ciclo completo de huevo a adulto requiere entre 15 y 77 días, y en los períodos cálidos del año bastan de 16 a 21 días, y el umbral térmico estimado para el desarrollo huevo–adulto es de aproximadamente 3,9 °C (Higley & Pedigo, 1984). El número de generaciones anuales varía con el clima local: debido a la estivación de las larvas en verano y a la diapausa de las pupas en invierno, suele haber únicamente entre 2 y 4 generaciones por año. Es decir, la especie responde a la temperatura y a la estacionalidad mediante mecanismos de dormancia (estivación y diapausa). Ecológicamente es un herbívoro generalista y a la vez detritívoro que se alimenta de material en descomposición, con un rango de más de 40 plantas hospederas (Rooney et al., 2025).
+
+#Hipótesis
+
+Las poblaciones de localidades con mayor estacionalidad climática presenten una diversidad genética distinta que las de ambientes más estables.
+
+#Metodología
+
+1.  Descargar secuencias del gen Citocromo Oxidasa I (COI *barcode* mitocondrial) desde **GenBank** con sus coordenadas correspondientes
+2.  Obtener variables climáticas desde **WorldClim** para las coordenadas de colecta
+3.  Calcular un índice de diversidad genética por región
+4.  Explorar la relación entre diversidad y clima (EDA)
+5.  Subir los datos y resultados a GitHub desde R
+
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+#esto permite que R busque todos los ejecutables de este archivo en la carpeta donde está este archivo
+knitr::opts_knit$set(root.dir = ".")
+options(timeout = 300)
+```
+
+## Parte 1. Preparar el entorno de trabajo
+
+```{r}
+setwd("/Users/santi/Documents/2026-1/Proyecto_genbank_final") #seleccionar el directorio donde se va a trabajar
+getwd()
+```
+
+Crear las carpetas del proyecto:
+
+```{r eval=FALSE}
+dir.create("data")
+dir.create("scripts")
+dir.create("figures")
+dir.create("output")
+```
+
+Instale y cargue los paquetes necesarios:
+
+```{r eval=FALSE}
+install.packages(c(
+  "rentrez",       # acceso a bases de datos NCBI (GenBank)
+  "ape",           # análisis de secuencias y genética de poblaciones
+  "seqinr",        # lectura y manipulación de secuencias
+  "geodata",       # descarga de datos WorldClim
+  "terra",         # manejo de datos raster (variables climáticas)
+  "tidyverse",     # manipulación y visualización de datos
+  "sf",            # datos espaciales
+  "rnaturalearth", # mapas base
+  "ggcorrplot",     # visualización de correlaciones
+  "msa",           # para el alineamiento de secuencias
+  "Biostrings"))  # para el alineamiento de secuencias
+```
+
+```{r message=FALSE, warning=FALSE}
+# ahora llamamos todas las librerías
+
+library(rentrez)
+library(ape)
+library(seqinr)
+library(geodata)
+library(terra)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(ggcorrplot)
+library(msa)
+library(Biostrings)
+library(lubridate)
+
+```
+
+------------------------------------------------------------------------
+
+## Parte 2. Descargar secuencias desde GenBank
+
+**GenBank** (<https://www.ncbi.nlm.nih.gov/genbank/>) es el repositorio de secuencias de ADN del NCBI.
+
+Para asegurarnos de que podíamos continuar con el proyecto, buscamos el gen, especie, longitud deseada y restringimos a los que solo tengan latitud y longitud con: "AND src lat lon[prop]", si hay al menos 500 datos, podemos continuar.
+
+El paquete `rentrez` nos permite hacer esa misma búsqueda directamente desde R:
+
+```{r}
+# Buscar secuencias de COI de Delia platura en GenBank (nucleótidos)
+busqueda <- entrez_search(db = "nucleotide",
+                          term = "Delia platura[ORGN] 
+                          AND COI[Gene]  
+                          AND 600:800[SLEN] 
+                          NOT predicted[Title] 
+                          NOT unverified[Title]
+                          AND src lat lon[prop]", #Esocoge unicamente las que tengan coordenadas
+                          # [ORGN] = organism, [Gene] = gen de interés
+                          # [SLEN] = largo de las secuencias, entre 500-700
+                          # [Title] = que incluyan (o no) palabras en el título
+                          retmax = 300)  # número máximo de registros a traer
+
+# retstart = 300 Esta línea era la que funciona para elegir desde que ítem esocger la busqueda
+
+#explorar el objeto resultante
+head(busqueda$ids)  # GI de cada registro descargado
+busqueda$count # = número de total registros encontrados (puede ser más del máximo establecidp en la búsqueda)
+busqueda$retmax # = número de resultados descargados
+busqueda$QueryTranslation # lo que genbank entendió de mi solicitud
+
+saveRDS(busqueda, "data/busqueda_delia.rds") # esto me permite guardar localmente la búsqueda
+busqueda <- readRDS("data/busqueda_delia.rds") # con esto accedo a mi búsqueda
+
+```
+
+Hasta ahora hemos obtenido un listado de las secuencias que cumplen con nuestros requisitos. Ahora, descarguemos esas secuencias en formato FASTA:
+
+```{r}
+# Descargar secuencias en formato FASTA
+# Dependiendo del largo de las secuencias (y del número de estas) a veces es buena idea descargar las secuencias en grupos pequeños. Como nuestras secuencias son cortas (<800pb), podemos descargar las 300 sin sobrecargar el servidor.
+
+seqs_raw <- entrez_fetch(db = "nucleotide",
+                         id = busqueda$ids,
+                         rettype = "fasta", #formato fasta, es decir las secuencias
+                         retmode = "text")
+
+# Veamos los resultados:
+head(seqs_raw)
+
+# Guardamos el archivo FASTA en la carpeta data/
+writeLines(seqs_raw, "data/Delia_platuraCOI.fasta") # esta función permite guardar archivos de texto
+
+```
+
+Se descargarán los registros en formato GenBank que contiene los metadatos que vamos a utilizar más adelante: país, coordenadas, año de colecta...
+
+```{r}
+# Descargar registros completos (formato genbank) para extraer metadatos
+gb_raw <- entrez_fetch(db = "nucleotide",
+                       id = busqueda$ids,
+                       rettype = "gb", #formato genbank, es decir los metadatos
+                       retmode = "text")
+
+# Veamos los resultados:
+head(gb_raw)
+
+
+# Guardamos el archivo GenBank en la carpeta data/
+writeLines(gb_raw, "data/delia_COI.gb")
+```
+
+#### Extracción de metadatos de los registros GenBank
+
+Buscar en Genbank el 'Accesion number' = PV080887.1 y revisar que los metadatos asociados (deben ser los mismos que se obtuvieron en la primera parte del archivo .gb). Esa es información importante sobre el origen y características de las muestras. Vamos a extraer el país y las coordenadasm que es la información que vamos a utilizar más adelante.
+
+```{r}
+# Dividir el texto por registros
+
+metadatos <- gb_raw %>%
+  str_split("(?=LOCUS\\s)", simplify = FALSE) %>%  # la estructura "(?=LOCUS\\s)" le indica a la función 'split' que quiero dividir el texto iniciando con la palabra 'LOCUS' seguido por un espacio '\\s' pero sin eliminar la palabra (eso hace el '?=')
+  unlist() %>%
+  as_tibble() %>%
+  dplyr::rename(registro = value) 
+
+# Veamos que metadatos obtuvimos:
+metadatos[3,1] #cada secuencia tiene todos los metadatos en una sola línea! Necesitmos organizar esos datos
+metadatos <- metadatos[-1, ] # se elimina la primera fila debido a un espacio en blanco no deseado.
+
+# Filtrar los registros válidos, es excluímos líneas con pocos datos
+metadatos <- metadatos %>%
+  filter(nchar(registro) > 100) 
+# Obtener campos específicos
+metadatos <- metadatos %>%
+  mutate(accession = str_extract(registro, "(?<=VERSION\\s{1,10})\\S+"),
+         localidad = str_extract(registro, '(?<=/geo_loc_name=")[^"]+'),
+         lat_lon = str_extract(registro, '(?<=/lat_lon=")[^"]+'),
+         fecha = str_extract(registro, '(?<=collection_date=")[^"]+'))
+
+Sys.setlocale("LC_TIME", "C")  # fuerza locale inglés solo para fechas
+
+metadatos <- metadatos %>%
+  mutate(
+    fecha    = str_extract(registro, '(?<=collection_date=")[^"]+'),
+    fecha    = as.Date(fecha, format = "%d-%b-%Y"),
+    año      = as.integer(format(fecha, "%Y")),
+    mes      = as.integer(format(fecha, "%m")),
+    estacion = case_when(
+      mes %in% c(3,4,5)  ~ "Primavera",
+      mes %in% c(6,7,8)  ~ "Verano",
+      mes %in% c(9,10,11)~ "Otoño",
+      mes %in% c(12,1,2) ~ "Invierno"))
+
+# Extraer datos de país. Revisen el archivo. Verán que la columna de 'localidad' contiene datos de país, seguido de más detalles geográficos. Pero queremos tener solo el país en una columna: 
+
+metadatos <- metadatos %>%
+  mutate(pais = str_extract(localidad, "^[^:]+")) # ^ - inicio del string
+# [^:] - cualquier cosa que no sea :
+# + - 1 o más caracteres 
+
+# 5. seleccionar columnas finales
+metadatos_limpio <- metadatos %>%
+  select(-registro)
+```
+
+Muchos registros no tienen coordenadas explícitas. Vamos a utilizar solo los que sí las tienen:
+
+```{r}
+# Extraer coordenadas (formato: "XX.XX N YY.YY E")
+metadatos_coord1 <- metadatos_limpio %>%
+  filter(!is.na(lat_lon)) %>% # eliminamos lo que no tenga datos
+  mutate(lat = as.numeric(str_extract(lat_lon, "[0-9.]+")),
+         lat = ifelse(str_detect(lat_lon, "S"), -lat, lat),
+         lon = as.numeric(str_extract(lat_lon, "(?<=\\s)[0-9.]+")),
+         lon = ifelse(str_detect(lat_lon, "W"), -lon, lon)) 
+
+# También se podría hacer con tidyverse:
+metadatos_coord2 <- metadatos_limpio %>%
+  filter(!is.na(lat_lon)) %>%
+  separate_wider_delim(lat_lon,
+                       delim = " ",
+                       names = c("lat", "lat_dir", "lon", "lon_dir"),
+                       cols_remove = FALSE) %>%
+  mutate(lat = as.numeric(lat),
+         lon = as.numeric(lon),
+         lat = if_else(lat_dir == "S", -lat, lat), 
+         lon = if_else(lon_dir == "W", -lon, lon))
+
+# Visualicemos el resultado
+head(metadatos_coord1)
+```
+
+Guardemos los metadatos:
+
+```{r}
+write.csv(metadatos_coord1, "data/Delia_platura_metadatos.csv", row.names = TRUE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 3. Descargar variables climáticas desde WorldClim
+
+**WorldClim** (<https://www.worldclim.org/>) es una base de datos de variables climáticas globales a alta resolución. Las variables más usadas son las **19 bioclimáticas (bio1–bio19)**, que resumen temperatura y precipitación de manera biológicamente relevante. Explore el sitio web y revise qué representa cada variable. Recuerde que la variable 'tiempo' en wordclim se refiere a:
+
+| Resolución  | Tamaño celda aprox. |
+|-------------|---------------------|
+| 10 minutes  | \~18–20 km          |
+| 5 minutes   | \~9–10 km           |
+| 2.5 minutes | \~4–5 km            |
+| 30 seconds  | \~1 km              |
+
+Descargamos las variables bioclimáticas con el paquete `geodata`:
+
+```{r}
+# Descargar variables bioclimáticas de WorldClim (resolución 10 min ~ 18 km)
+# res puede ser: 10, 5, 2.5 (minutos de grado). A mayor detalle, más pesado.
+bioclim <- worldclim_global(var = "bio", res = 10, path = "data/")
+
+# Visualicemos los datos que descargamos
+names(bioclim)  # 19 capas: bio1 a bio19
+```
+
+Las capas que vamos a utilizadar para el proyecto son: - **bio1**: Temperatura media anual (°C × 10) - **bio4**: Estacionalidad de temperatura (coef. de variación) - **bio12**: Precipitación anual (mm) - **bio15**: Estacionalidad de precipitación
+
+Ahora extraemos los valores climáticos para las coordenadas de nuestros registros de GenBank:
+
+```{r}
+# Convertir coordenadas a objeto espacial
+puntos_sf <- st_as_sf(metadatos_coord1,
+                      coords = c("lon", "lat"),
+                      crs = 4326)
+
+puntos_vect <- vect(puntos_sf)
+
+# Extraer valores del raster en los puntos
+valores_bio <- terra::extract(bioclim, puntos_vect)
+
+# Combinar con los metadatos
+datos_clima <- bind_cols(metadatos_coord1, valores_bio) %>%
+  select(-ID)  # columna generada por terra que no necesaria
+
+head(datos_clima)
+```
+
+`bio1` viene en décimas de grado (×10) y `bio4` está también en escala de 100. Para corregir las unidades, entonces hacemos:
+
+```{r}
+datos_clima <- datos_clima %>%
+  mutate(temp_media = wc2.1_10m_bio_1 / 10,   # temperatura media anual en °C
+         estac_temp = wc2.1_10m_bio_4 / 100,  # estacionalidad temperatura
+         precip_anual = wc2.1_10m_bio_12,      # precipitación anual en mm
+         estac_precip = wc2.1_10m_bio_15)     # estacionalidad precipitación
+
+datos_clima_limpios <- datos_clima %>%
+  select(accession, localidad, pais, lat, lon, temp_media, estac_temp,
+         precip_anual, estac_precip)
+```
+
+Guardamos ambos sets de datos:
+
+```{r}
+write.csv(datos_clima, "data/Delia_Totalclima.csv", row.names = TRUE)
+write.csv(datos_clima_limpios, "data/Delia_climaLimpio.csv", 
+          row.names = TRUE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 4. Calcular diversidad genética
+
+Ahora necesitamos una medida de diversidad genética por localidad o región. Vamos a calcular la **diversidad de nucleótidos (π)** y el **número de haplotipos** por país/región utilizando el paquete `ape`.
+
+Primero, leemos las secuencias FASTA:
+
+```{r}
+# Leer las secuencias
+seqs_fasta <- readDNAStringSet("data/Delia_platuraCOI.fasta")
+
+```
+
+El objeto 'seqs_fasta' es una lista de secuencias no alineadas. Empecemos por alinearlas para poder calcular las distancias genéticas entre ellas.
+
+```{r}
+alineamiento <- msa(seqs_fasta, method = "ClustalW")
+
+seq_matriz <- as.DNAbin(alineamiento) # convertimos el alineamiento en una matriz
+dim(seq_matriz)
+rownames(seq_matriz)
+
+# PHYLIP, que es el formato en el que vamos a guardar la matriz solo permite hasta 10 caracteres en el nombre de cada secuencia, entonces vamos a recortar el nombre a solo el número de GenBank:
+
+rownames(seq_matriz) <- substr(rownames(seq_matriz), 1, 10)
+rownames(seq_matriz)
+ 
+#Para exportar la matriz:
+write.dna(seq_matriz,
+          file = "data/Deliapla_matriz.phy",
+          format = "sequential")
+
+#Para empezar desde la matriz
+# seq_matriz <- read.dna(file = "~/2026-1/Deliapla_matriz.phy", format = "sequential")
+
+```
+
+Calculamos la diversidad de nucleótidos global (π):
+
+```{r}
+# Matriz de distancias entre secuencias (modelo Felsenstein 84)
+dist_seqs <- dist.dna(seq_matriz, model = "F84", pairwise.deletion = TRUE)
+
+# Diversidad de nucleótidos promedio (pi)
+pi_global <- mean(as.vector(dist_seqs), na.rm = TRUE)
+pi_global
+```
+
+Ahora calculamos π por país. Para esto necesitamos cruzar los IDs de las secuencias con los metadatos:
+
+```{r}
+# 1. Crear tibble con secuencias
+seqs_tbl <- tibble(accession = rownames(seq_matriz),
+                   seq = split(seq_matriz, row(seq_matriz)))
+
+# 2. Unir con metadatos
+datos_comb <- seqs_tbl %>%
+  left_join(metadatos_coord1, by = "accession")
+
+metadatos_coord1 %>% select(accession, lat, lon, pais) %>% head(10)
+
+# 3. Filtrar países con al menos 3 secuencias
+datos_filtrados <- datos_comb %>%
+  filter(!is.na(pais)) %>%
+  group_by(pais) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+# 4. Calcular diversidad genética (π) por país
+diversidad_pais <- datos_filtrados %>%
+  group_by(pais) %>%
+  summarise(n_seqs = n(),
+            pi = {idx <- match(accession, rownames(seq_matriz))
+            sub_matrix <- seq_matriz[idx, ]
+            dist_sub <- dist.dna(sub_matrix, model = "K80", 
+                                 pairwise.deletion = TRUE)
+            mean(as.vector(dist_sub), na.rm = TRUE)
+    },
+    .groups = "drop")
+
+print(diversidad_pais)
+```
+
+Guarde los resultados:
+
+```{r}
+write.csv(diversidad_pais, "output/Delia_divnuc_pais.csv", row.names = TRUE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 5. Análisis Exploratorio de Datos (EDA)
+
+Ahora que tenemos diversidad genética y variables climáticas, vamos a explorar si existe alguna relación.
+
+### 5.1 Promediar variables climáticas por país
+
+```{r}
+clima_pais <- datos_clima %>%
+  group_by(pais) %>%
+  summarise(
+    temp_media_prom = mean(temp_media, na.rm = TRUE),
+    precip_anual_prom = mean(precip_anual, na.rm = TRUE),
+    estac_temp_prom = mean(estac_temp, na.rm = TRUE),
+    estac_precip_prom = mean(estac_precip, na.rm = TRUE),
+    n_puntos = n()
+  ) %>%
+  filter(!is.na(pais))
+
+head(clima_pais)
+```
+
+Unimos con la diversidad:
+
+```{r}
+datos_analisis <- inner_join(diversidad_pais, clima_pais, by = "pais")
+print(datos_analisis)
+```
+
+### 5.2 Visualización: diversidad vs. temperatura
+
+```{r}
+p1 <- ggplot(datos_analisis, aes(x = temp_media_prom, y = pi, label = pais)) +
+  geom_point(aes(size = n_seqs), color = "#2E86AB", alpha = 0.8) +
+  geom_text(vjust = -0.8, size = 3.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#E84855", linetype = "dashed") +
+  labs(x = "Temperatura media anual (°C)",
+    y = "Diversidad de nucleótidos (π)",
+    size = "N secuencias") +
+  theme_minimal(base_size = 7)
+
+p1
+ggsave("figures/Deliadivgen-temp.png", p1, 
+       width = 8, height = 6, dpi = 300) # para guardar su figura
+```
+
+### 5.3 Visualización: diversidad vs. precipitación
+
+```{r}
+p2 <- ggplot(datos_analisis, aes(x = precip_anual_prom, y = pi, label = pais)) +
+  geom_point(aes(size = n_seqs), color = "#A23B72", alpha = 0.8) +
+  geom_text(vjust = -0.8, size = 3.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#F18F01", linetype = "dashed") +
+  labs(x = "Precipitación anual (mm)",
+    y = "Diversidad de nucleótidos (π)",
+    size = "N secuencias") +
+  theme_minimal(base_size = 7)
+
+p2
+ggsave("figures/Deliadivgen-prec.png", p2, 
+       width = 8, height = 6, dpi = 300)
+```
+
+### 5.4 Mapa de las localidades coloreado por diversidad
+
+```{r}
+# Unir diversidad con los datos de coordenadas individuales
+datos_mapa <- datos_clima %>%
+  left_join(select(diversidad_pais, pais, pi), by = "pais") %>%
+  filter(!is.na(pi))
+
+# Mapa base
+mundo <- ne_countries(returnclass = "sf", scale = "medium")
+
+p3 <- ggplot() +
+  geom_sf(data = mundo, fill = "grey90", color = "grey60", size = 0.3) +
+  geom_point(data = datos_mapa,
+             aes(x = lon, y = lat, color = pi),
+             size = 3, alpha = 0.8) +
+  scale_color_gradient2(
+    low = "#3A86FF", mid = "#FFBE0B", high = "#FB5607",
+    midpoint = median(datos_mapa$pi, na.rm = TRUE),
+    name = "π (diversidad\nnucleotídica)") +
+  labs(x = "Longitud", y = "Latitud") +
+  theme_bw(base_size = 7)
+
+p3
+ggsave("figures/Deliamapa_div.png", p3, 
+       width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+metadatos_coord1 <- metadatos_coord1 %>%
+  left_join(metadatos %>% select(accession, año, mes, estacion, fecha),
+            by = "accession")
+
+# π por estación
+pi_estacion <- datos_comb %>%
+  filter(!is.na(estacion)) %>%
+  group_by(estacion) %>%
+  filter(n() >= 3) %>%
+  summarise(accessions = list(accession), n = n(), .groups = "drop") %>%
+  mutate(pi = map_dbl(accessions, function(ids) {
+    sub_mat <- seq_matriz[rownames(seq_matriz) %in% ids, ]
+    mean(as.vector(dist.dna(sub_mat, model = "F84", 
+                            pairwise.deletion = TRUE)), na.rm = TRUE)
+  }))
+
+p4 <- pi_estacion %>%
+  ggplot(aes(x = estacion, y = pi, fill = estacion)) +
+  geom_col(alpha = 0.7) +
+  geom_text(aes(label = paste0("n=", n)), vjust = -0.5) +
+  labs(title = "Diversidad nucleotídica por estación de colecta",
+       x = "Estación", y = "π") +
+  theme(legend.position = "none")
+pi_estacion %>% select(estacion, n, pi) %>% arrange(desc(pi))
+
+p4
+
+ggsave("figures/Deliabar_plot.png", p4, 
+       width = 10, height = 6, dpi = 300)
+
+```
+
+## Parte 6. Discusión
+
+Los resultados obtenidos permiten crear una relación entre la diversidad genética de Delia platura y las condiciones climáticas de sus localidades de origen. Tanto frente a la temperatura media anual como frente a la precipitación anual se observó una tendencia negativa: las poblaciones de Canadá, asociadas a climas más fríos y secos, presentaron la mayor diversidad nucleotídica, mientras que las de Estados Unidos, en localidades más cálidas y húmedas, mostraron una diversidad notablemente menor. Esta dirección es consistente con la hipótesis planteada, según la cual las localidades de mayor estacionalidad térmica concentrarían una mayor variación genética, y se articula bien con la biología de una especie cuyo desarrollo y número de generaciones anuales dependen estrechamente de la temperatura.
+
+Esta lectura climática se puede explicar de manera histórica. Delia platura es una especie de origen europeo que colonizó Norteamérica hacia mediados del siglo XIX y se expandió de forma gradual (Capinera, 2008). La baja diversidad nucleotídica observada en el conjunto de los datos es característica de poblaciones que se han establecido a partir de eventos de colonización, en los que solo una fracción de la variación original se transmite a las nuevas áreas (Dlugosch & Parker, 2008). El gradiente encontrado puede entenderse así como el resultado conjunto del clima y de la trayectoria de invasión de la especie, dos fuerzas que han modelado de manera complementaria la diversidad que se observa hoy.
+
+El mapa de diversidad refuerza esta interpretación al mostrar que la variación genética se distribuye de forma estructurada en el espacio, con las poblaciones más septentrionales concentrando los valores más altos de π. La concentración de registros entre los 35° y 60° de latitud norte coincide además con la franja de mayor abundancia descrita para la especie (Cornell CALS, 2023), lo que sugiere que el patrón espacial recuperado refleja de manera razonable la zona donde D. platura alcanza su mayor presencia.
+
+Aunque se observó una diferencia marcada entre estaciones, con el verano mostrando la mayor diversidad, esta variación se explica de manera más plausible por la composición geográfica de cada conjunto estacional que por un efecto propio de la estación. Las colectas de verano provienen de un mayor número de localidades, de modo que la mayor distancia genética promedio entre secuencias refleja la mezcla de linajes de procedencias distintas. Que el muestreo se concentre en primavera y verano es además esperable, pues es en esos períodos cuando la especie se comporta como plaga activa y resulta más fácil de detectar (Higley & Pedigo, 1984). La estación de colecta opera entonces como un reflejo del origen geográfico de las muestras, y su lectura adecuada enriquece la interpretación del conjunto.
+
+Delia platura es una plaga activa sobre semillas en germinación durante primavera y verano en el hemisferio norte. En invierno la especie está en diapausa como pupa en el suelo, no hay adultos volando ni larvas atacando cultivos, así que sencillamente no hay individuos disponibles para colectar. Los estudios de campo recogen las moscas cuando causan daño agronómico, y eso ocurre en la temporada cálida, no en invierno.
+
+En síntesis, los resultados dibujan un escenario en el que la diversidad genética de Delia platura se organiza siguiendo un gradiente climático y geográfico interpretable, en el que el clima y la historia evolutiva de la especie se entrelazan para dar forma a la variación actual de sus poblaciones.
+
+## Parte 7. Conclusiones
+
+-   Las poblaciones de Delia platura asociadas a climas más fríos y secos exhibieron una mayor diversidad nucleotídica que las de localidades más cálidas y húmedas, en la dirección prevista por la hipótesis de estacionalidad climática.
+
+-   El patrón encontrado es biológicamente coherente con una especie cuyo ciclo de vida y número de generaciones dependen estrechamente de la temperatura.
+
+-   La baja diversidad nucleotídica general sugiere que la historia de invasión de la especie actúa junto con el clima en la configuración de la diversidad observada.
+
+-   La variación de la diversidad entre estaciones de colecta se interpreta como reflejo del origen geográfico de las muestras, lo que resalta la importancia del contexto espacial al analizar patrones genéticos.
+
+-   En conjunto, la diversidad genética de Delia platura se organiza siguiendo un gradiente climático y geográfico interpretable, abriendo una línea de estudio prometedora sobre la influencia conjunta del clima y la historia evolutiva en la variación genética de especies de amplia distribución.
+
+## Parte 8. Referencias
+
+Capinera, J. L. (2008). Seedcorn maggot or bean seed fly, Delia platura (Meigen) (Diptera: Anthomyiidae). En J. L. Capinera (Ed.), Encyclopedia of entomology (2.ª ed.). Springer. <https://doi.org/10.1007/978-1-4020-6359-6_4109>
+
+Cornell CALS. (2023). Seedcorn maggot IPM [Hoja informativa]. New York State Integrated Pest Management, Cornell University. <https://cals.cornell.edu/new-york-state-integrated-pest-management/outreach-education/fact-sheets/seedcorn-maggot-ipm>
+
+Higley, L. G., & Pedigo, L. P. (1984). Seedcorn maggot (Diptera: Anthomyiidae) population biology and aestivation in central Iowa. Environmental Entomology, 13(5), 1436–1442. <https://doi.org/10.1093/ee/13.5.1436>
+
+Rooney, K. (2025). Founding and maintaining a seedcorn maggot (Delia platura) colony. Entomologia Experimentalis et Applicata, 173, 918–922. <https://doi.org/10.1111/eea.13593>
+
+Dlugosch, K. M., & Parker, I. M. (2008). Founding events in species invasions: Genetic variation, adaptive evolution, and the role of multiple introductions. Molecular Ecology, 17(1), 431–449. <https://doi.org/10.1111/j.1365-294X.2007.03538.x>
+
+## Parte 9. Actualizar el repositorio en GitHub
+
+Ustedes han generado varios archivos: datos crudos, metadatos, índices de diversidad, y figuras. Antes de subir, revise que su README.md describe el proyecto correctamente.
+
+Desde el terminal de RStudio:
+
+``` bash
+# Verificar estado de los archivos
+git status
+
+# Agregar todos los archivos nuevos/modificados
+git add data/ output/ figures/ scripts/
+
+# Crear el commit con un mensaje descriptivo
+git commit -m "Miniproyecto 1: datos GenBank, WorldClim, y EDA diversidad vs. clima"
+
+# Subir al repositorio remoto
+git push
+```
+
+O puede hacerlo desde R con el paquete `gert` (alternativa a usethis para commits desde código):
+
+```{r eval=FALSE}
+install.packages("gert")
+library(gert)
+
+git_add(".")
+git_commit("Miniproyecto 1: datos GenBank, WorldClim, y EDA diversidad vs. clima")
+git_push()
+```
+
+------------------------------------------------------------------------

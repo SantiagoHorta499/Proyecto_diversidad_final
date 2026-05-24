@@ -1,0 +1,608 @@
+---
+title: "Miniproyecto 2: Diversidad Genética y Distribución de Especies"
+subtitle: "Rana temporaria — iNaturalist + GenBank"
+output: html_document
+date: "2026-05-26"
+---
+
+```{r}
+knitr::include_graphics("figures/rana.jpg")
+```
+
+## Contexto
+
+En este miniproyecto vamos a explorar si la **distribución geográfica** de una especie coincide con su **diversidad genética**.
+
+Rana temporaria (Linnaeus, 1758) es el anfibio de distribución más amplia en Europa y uno de los vertebrados más utilizados como especie modelo en estudios de ecología, fisiología y genética de poblaciones. Su rango abarca desde el norte de España y el norte de Grecia hasta el Círculo Ártico en Escandinavia, y desde Irlanda hasta los Montes Urales en el este (Stefani et al., 2012), lo que la convierte en un sistema biológico excepcional para explorar patrones de diversidad a escala continental. Su sensibilidad a los cambios en el hábitat y al deterioro de los cuerpos de agua la posiciona además como especie indicadora de la salud de los ecosistemas de agua dulce europeos, y su ciclo de vida bifásico, acuático durante la reproducción y terrestre el resto del año, la hace especialmente vulnerable a la fragmentación del paisaje.
+
+Dada su distribución continental, una cuadrícula de 5° × 5° constituye la escala geográfica más adecuada para este análisis, pues permite capturar variación entre regiones biogeográficamente distintas sin perder resolución en las zonas de mayor densidad de muestreo.
+
+## Pregunta
+
+> ¿Difieren la diversidad genética (π) y la densidad de registros de observación de Rana temporaria entre las poblaciones del sur de Europa y las del norte, y qué podría explicar estas diferencias?
+
+## Hipótesis
+
+Las poblaciones meridionales presentan mayor diversidad genética que las poblaciones septrentionales.
+
+Esto se respaldo con la hipótesis de los refugios glaciares en el borde del rango, la cual indica que la Península Ibérica y los Alpes italianos actuaron como refugios pleistocénicos para el linaje occidental de la especie, desde donde se produjo una recolonización de borde de avance hacia el norte que redujo progresivamente la diversidad genética por efectos fundadores sucesivos (Stefani et al., 2012). Las poblaciones del Reino Unido, como producto de esa recolonización reciente, representarían el extremo de menor diversidad del gradiente.
+
+## Metodología:
+
+1.  Descargar registros de presencia desde **iNaturalist** vía el API de **GBIF**
+2.  Descargar secuencias desde **GenBank**
+3.  Calcular un índice de diversidad genética por región geográfica
+4.  Analizar la relación entre diversidad genética y densidad de registros
+5.  Visualizar la distribución y diversidad en mapas
+6.  Subir todo a GitHub
+
+------------------------------------------------------------------------
+
+## Parte 1. Preparar el entorno de trabajo
+
+Confirme que está dentro de su proyecto y que las carpetas existen:
+
+```{r}
+getwd()
+```
+
+```{r eval=FALSE}
+dir.create("data")
+dir.create("scripts")
+dir.create("figures")
+dir.create("output")
+```
+
+Instalar y cargar los paquetes necesarios:
+
+```{r eval=FALSE}
+install.packages(c(
+  "rgbif",         # acceso a datos de GBIF (incluye iNaturalist)
+  "rentrez",       # acceso a GenBank (NCBI)
+  "ape",           # análisis de secuencias
+  "tidyverse",     # manipulación y visualización
+  "sf",            # datos espaciales vectoriales
+  "terra",         # datos raster
+  "rnaturalearth", # mapas base
+  "ggdensity",     # visualización de densidad
+  "viridis",        # paletas de color accesibles
+  "msa",
+  "Biostrings"
+  ))
+```
+
+```{r message=FALSE, warning=FALSE}
+library(rgbif)
+library(rentrez)
+library(ape)
+library(tidyverse)
+library(sf)
+library(terra)
+library(rnaturalearth)
+library(viridis)
+library(msa)
+library(Biostrings)
+```
+
+------------------------------------------------------------------------
+
+## Parte 2. Descargar registros de distribución desde iNaturalist vía GBIF
+
+**iNaturalist** (<https://www.inaturalist.org/>) es una plataforma de ciencia ciudadana donde voluntarios registran observaciones de organismos. Sus datos de mayor calidad (grado de investigación) son compartidos automáticamente con **GBIF**. Se exploró iNaturalist antes de empezar para buscar si *Rana temporaria* tenía suficientes registros y en qué países.
+
+El paquete `rgbif` nos permite descargar estos datos directamente desde R, filtrando por fuente (iNaturalist tiene su propio datasetKey en GBIF):
+
+```{r}
+# El datasetKey de iNaturalist en GBIF es:
+# 50c9509d-22c7-4a22-a47d-8c48425ef4a7
+
+# Primero obtengamos el código taxonómico de la especie
+rt_taxon <- name_backbone(name = "Rana temporaria", rank = "species")
+rt_taxon
+```
+
+```{r}
+# Descargar registros de iNaturalist para Rana temporaria
+rt_obs <- occ_search(
+  taxonKey = rt_taxon$usageKey,
+  datasetKey = "50c9509d-22c7-4a22-a47d-8c48425ef4a7",  # iNaturalist
+  hasCoordinate = TRUE,
+  hasGeospatialIssue = FALSE,
+  occurrenceStatus = "PRESENT",
+  limit = 2000,
+  fields = c("key", "scientificName", "decimalLatitude", "decimalLongitude",
+             "eventDate", "stateProvince", "countryCode",
+             "coordinateUncertaintyInMeters", "year"))
+
+```
+
+Extraiga los datos y realice una limpieza básica:
+
+```{r}
+data_rt <- rt_obs$data
+
+# Revisión inicial
+glimpse(data_rt)
+```
+
+```{r}
+# Limpieza: coordenadas no nulas, incertidumbre razonable (< 1000 m), año conocido
+data_rt_limpio <- data_rt %>%
+  filter(
+    !is.na(decimalLatitude),
+    !is.na(decimalLongitude),
+    is.na(coordinateUncertaintyInMeters) | coordinateUncertaintyInMeters < 1000,
+    !is.na(year))
+
+```
+
+Se obtuvieron 1790 registros después de la limpieza.
+
+#### Explorar el dataset:
+
+-   En cuántos países se registró la especie?
+-   En qué años hay más registros? Esto refleja la historia de iNaturalist o la biología de la especie?
+-   Cuántos registros tienen incertidumbre de coordenadas muy alta (\> 10 km)? (para responder esta, utilizar el bd inicial, sin limpiar)
+
+Guarde los datos limpios:
+
+```{r}
+data_rt_limpio %>% count(data_rt_limpio$countryCode)
+# En 28 paises fue registrada la especie
+
+data_rt_limpio %>% count(data_rt_limpio$year)
+# Esto refleja datos sesgados por la historia de Inaturalist, ya que solo refleja los datos recientes.
+# El año con más registros es 2026, y es el único.
+
+data_rt %>%
+  filter(coordinateUncertaintyInMeters > 10000) %>%
+  nrow()
+# 115 registros tienen una incertidumbre mayor a 10km
+```
+
+```{r}
+write.csv(data_rt_limpio, "data/Rana_inat.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 3. Descargar secuencias desde GenBank
+
+Ahora descargamos las secuencias de *Rana temporaria* disponibles en GenBank. Usaremos el marcador cytb, uno de los más común en estudios de biodiversidad.
+
+```{r}
+# Buscar secuencias de cytb de Rana temporaria
+busqueda_rt <- entrez_search(
+  db = "nucleotide",
+  term = "Rana temporaria[ORGN] AND cytb[Gene] AND src lat lon[prop]",
+  retmax = 201)
+```
+
+```{r}
+# Descargar secuencias en formato FASTA
+seqs_rt_raw <- entrez_fetch(
+  db = "nucleotide",
+  id = busqueda_rt$ids,
+  rettype = "fasta",
+  retmode = "text")
+
+writeLines(seqs_rt_raw, "data/Rana.fasta")
+```
+
+```{r}
+# Descargar metadatos (formato GenBank completo)
+gb_rt_raw <- entrez_fetch(
+  db = "nucleotide",
+  id = busqueda_rt$ids,
+  rettype = "gb",
+  retmode = "text")
+
+writeLines(gb_rt_raw, "data/rana_Cytb.gb")
+```
+
+### Extraer metadatos geográficos de GenBank
+
+```{r}
+# Dividir por registros
+registros_rt <- gb_rt_raw %>%
+  str_split("(?=LOCUS\\s)", simplify = FALSE) %>%
+  unlist()
+registros_rt <- registros_rt[nchar(registros_rt) > 100]
+
+# Extraer campos de cada registro
+metadatos_rt <- registros_rt %>%
+  map_dfr(~ tibble(
+        accession = str_extract(
+      .x,
+      "(?<=ACCESSION\\s{1,10})\\S+"),
+    
+      pais = str_extract(
+      .x,
+      '(?<=/geo_loc_name=")[^":]+'), #Se buscó por geo_loc_name y no por country
+    
+    lat_lon = str_extract(
+      .x,
+      '(?<=/lat_lon=")[^"]+')
+    ))
+
+# Parsear coordenadas
+metadatos_rt_coord <- metadatos_rt %>%
+  filter(!is.na(lat_lon)) %>%
+  mutate(
+    lat = as.numeric(str_extract(lat_lon, "[0-9.]+")),
+    lat = ifelse(str_detect(lat_lon, "S"), -lat, lat),
+    lon = as.numeric(str_extract(lat_lon, "(?<=\\s)[0-9.]+")),
+    lon = ifelse(str_detect(lat_lon, "W"), -lon, lon)
+  ) %>%
+  filter(!is.na(lat), !is.na(lon))
+
+write.csv(metadatos_rt_coord, "data/Rana_metadatos_genbank.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 4. Definir regiones geográficas y calcular diversidad
+
+Para relacionar diversidad genética con distribución, necesitamos agrupar las secuencias por regiones geográficas comparables. Vamos a crear una cuadrícula (grid) sobre el área de distribución de la especie:
+
+```{r}
+# Leer secuencias
+seqs_rt <- readDNAStringSet(
+  "data/Rana.fasta")
+names(seqs_rt)
+```
+
+```{r}
+# Preparar las secuencias para el alineamiento
+seqs_rt_dna <- DNAStringSet(
+  sapply(seqs_rt, function(x) paste(as.character(x), collapse = "")))
+alineamiento <- msa(seqs_rt, method = "ClustalW")
+
+writeXStringSet(
+  as(alineamiento, "DNAStringSet"),
+  filepath = "data/alineamiento_rt.fasta")
+
+seq_matriz <- read.dna(
+  "data/alineamiento_rt.fasta",
+  format = "fasta")
+
+rownames(seq_matriz)
+dim(seq_matriz)
+dist.dna(seq_matriz)
+
+```
+
+Vamos a asignar cada secuencia a una celda de cuadrícula de 5° × 5°:
+
+```{r}
+# Crear celdas de 5 grados sobre las coordenadas disponibles
+metadatos_rt_coord <- metadatos_rt_coord %>%
+  mutate(
+    celda_lat = floor(lat / 5) * 5,
+    celda_lon = floor(lon / 5) * 5,
+    celda_id = paste0(celda_lat, "_", celda_lon)
+  )
+
+table(metadatos_rt_coord$celda_id)
+```
+
+Calculamos π por celda (mínimo 3 secuencias):
+
+```{r}
+ids_seqs_rt <- rownames(seq_matriz)
+
+acc_seqs_rt <- str_extract(
+  ids_seqs_rt,
+  "^[A-Z]{1,2}[0-9]+")
+
+indices_match_rt <- match(
+  acc_seqs_rt,
+  metadatos_rt_coord$accession)
+
+celdas_seqs <- metadatos_rt_coord$celda_id[
+  indices_match_rt]
+
+lat_celdas <- metadatos_rt_coord$celda_lat[
+  indices_match_rt]
+
+lon_celdas <- metadatos_rt_coord$celda_lon[
+  indices_match_rt]
+
+celdas_validas <- names(
+  which(table(celdas_seqs) >= 3))
+
+diversidad_celdas <- map_dfr(
+  celdas_validas,
+  function(c) {
+    
+    idx <- which(celdas_seqs == c)
+    
+    # usar seq_matriz
+    sub_matrix <- seq_matriz[idx, ]
+    
+    dist_sub <- dist.dna(
+      sub_matrix,
+      model = "K80",
+      pairwise.deletion = TRUE)
+    
+    pi_celda <- mean(
+      as.vector(dist_sub),
+      na.rm = TRUE)
+    
+    tibble(
+      celda_id = c,
+      celda_lat = lat_celdas[idx[1]],
+      celda_lon = lon_celdas[idx[1]],
+      n_seqs = length(idx),
+      pi = pi_celda)
+  }
+)
+
+print(diversidad_celdas)
+write.csv(diversidad_celdas, "output/diversidad_por_celda.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 5. Calcular densidad de registros de iNaturalist por celda
+
+```{r}
+# Asignar celdas a los registros de iNaturalist
+data_rt_limpio <- data_rt_limpio %>%
+  mutate(
+    celda_lat = floor(decimalLatitude / 5) * 5,
+    celda_lon = floor(decimalLongitude / 5) * 5,
+    celda_id = paste0(celda_lat, "_", celda_lon)
+  )
+
+# Contar registros por celda
+densidad_celdas <- data_rt_limpio %>%
+  group_by(celda_id, celda_lat, celda_lon) %>%
+  summarise(
+    n_registros = n(),
+    n_anios = n_distinct(year),
+    .groups = "drop"
+  )
+
+head(densidad_celdas)
+```
+
+Unimos diversidad y densidad:
+
+```{r}
+datos_analisis2 <- inner_join(diversidad_celdas, 
+                              densidad_celdas, by = "celda_id") %>%
+  select(celda_id, celda_lat = celda_lat.x, celda_lon = celda_lon.x,
+         n_seqs, pi, n_registros, n_anios)
+
+print(datos_analisis2)
+write.csv(datos_analisis2, "output/diversidad_vs_distribucion.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## Parte 6. Análisis Exploratorio de Datos (EDA)
+
+### 6.1 Mapa de distribución (iNaturalist)
+
+```{r}
+mundo <- ne_countries(returnclass = "sf", scale = "medium")
+
+# Rango de la especie aproximado (Europa y Asia occidental)
+bbox <- c(xmin = -10, xmax = 40, ymin = 35, ymax = 70)
+
+p1 <- ggplot() +
+  geom_sf(data = mundo, fill = "grey90", color = "grey50", size = 0.3) +
+  geom_point(data = data_rt_limpio,
+             aes(x = decimalLongitude, y = decimalLatitude),
+             color = "#3B9EBB", size = 1, alpha = 0.4) +
+  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+           ylim = c(bbox["ymin"], bbox["ymax"])) +
+  labs(x = "Longitud", y = "Latitud",
+    caption = paste("N =", nrow(data_rt_limpio), "registros")) +
+  theme_bw(base_size = 13)
+
+p1
+ggsave("figures/distribucion_inat.png", p1, width = 10, height = 7, dpi = 300)
+```
+
+### 6.2 Mapa de densidad de registros
+
+```{r}
+p2 <- ggplot() +
+  geom_sf(data = mundo, fill = "grey90", color = "grey50", size = 0.3) +
+  stat_density_2d(
+    data = data_rt_limpio,
+    aes(x = decimalLongitude, y = decimalLatitude, fill = after_stat(level)),
+    geom = "polygon", alpha = 0.7, bins = 15) +
+  scale_fill_viridis_c(option = "inferno", name = "Densidad") +
+  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+           ylim = c(bbox["ymin"], bbox["ymax"])) +
+  labs(x = "Longitud", y = "Latitud") +
+  theme_bw(base_size = 13)
+
+p2
+ggsave("figures/densidad_distribucion.png", p2, width = 10, height = 7, dpi = 300)
+```
+
+### 6.3 Mapa combinado: diversidad genética sobre distribución
+
+```{r}
+p3 <- ggplot() +
+  geom_sf(data = mundo, fill = "grey90", color = "grey50", size = 0.3) +
+  geom_point(data = data_rt_limpio,
+             aes(x = decimalLongitude, y = decimalLatitude),
+             color = "grey70", size = 0.8, alpha = 0.3) +
+  geom_point(data = datos_analisis2,
+             aes(x = celda_lon + 2.5, y = celda_lat + 2.5,
+                 color = pi, size = n_seqs),
+             alpha = 0.9) +
+  scale_color_gradient2(
+    low = "#2196F3", mid = "#FFEB3B", high = "#F44336",
+    midpoint = median(datos_analisis2$pi, na.rm = TRUE),
+    name = "π (diversidad\ngenética)"
+  ) +
+  scale_size_continuous(name = "N secuencias", range = c(4, 10)) +
+  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+           ylim = c(bbox["ymin"], bbox["ymax"])) +
+  labs(x = "Longitud", y = "Latitud") +
+  theme_bw(base_size = 13)
+
+p3
+ggsave("figures/mapa_diversidad_distribucion.png", p3, width = 11, height = 7, dpi = 300)
+```
+
+### 6.4 Relación diversidad vs. densidad de observaciones
+
+```{r}
+p4 <- ggplot(datos_analisis2, aes(x = n_registros, y = pi)) +
+  geom_point(aes(size = n_seqs, color = celda_lat), alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "#333333", linetype = "dashed") +
+  scale_color_gradient2(
+    low = "#1B4", mid = "#FFFD82", high = "#1B998B",
+    midpoint = 0, name = "Latitud") +
+  scale_size_continuous(name = "N secuencias", range = c(3, 10)) +
+  labs(x = "Número de registros en iNaturalist",
+    y = "Diversidad de nucleótidos (π)") +
+  theme_bw(base_size = 13)
+
+p4
+ggsave("figures/diversidad_vs_registros.png", p4, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
+# Existe correlación estadística?
+cor_test <- cor.test(datos_analisis2$pi, datos_analisis2$n_registros,
+                     method = "pearson")
+
+cat("  r =", round(cor_test$estimate, 3), "\n")
+cat("  p-valor =", round(cor_test$p.value, 4), "\n")
+
+# No hay relación estadística, el p supera el umbral de 0.05 y r sugiere que hay una correlación negativa leve (r = -0.465 sugiere que a mayor número de registros, menor π)
+```
+
+### 6.5 La diversidad varía con la latitud?
+
+```{r}
+p5 <- ggplot(datos_analisis2, aes(x = abs(celda_lat), y = pi)) +
+  geom_point(aes(size = n_seqs), 
+             alpha = 0.8, color = "#B15D05") +
+  geom_smooth(method = "lm", se = TRUE, color = "#444444", linetype = "dashed") +
+  scale_size_continuous(name = "N secuencias", range = c(3, 10)) +
+  labs(x = "Latitud absoluta (distancia al ecuador)",
+       y = "Diversidad de nucleótidos (π)") +
+  theme_bw(base_size = 13)
+
+p5
+ggsave("figures/gradiente_latitudinal.png", p5, width = 8, height = 6, dpi = 300)
+```
+
+#### Reflexione sobre sus resultados:
+
+-   Las regiones con más registros de iNaturalist tienen también más diversidad genética? O podría ser al revés: más registros simplemente porque hay más personas observando (sesgo de muestreo)?
+
+No, en esta especie no hay una correlación directa entre el número de registros en inaturalist y su diversidad genética, esta se mantiene prácticamente constante.
+
+-   Se observa el gradiente latitudinal de diversidad esperado?
+
+Sí, Rana temporaria es una especie con una mayor diversidad genética en areás meridionales (Stefani,f. et al 2012). En el gráfico se observa una disminución de variabilidad genética a medida que se aumenta la latitud
+
+-   Qué diferencia hay entre la cobertura geográfica de iNaturalist y la de GenBank para esta especie?
+
+## La cobertura entre ambas parece ser significativamente igual, donde hay más abundancia en inaturalist, es donde se observan registros genómicos en genbank. Esto se debe a que sobre esta especie, hay muchos estudios de diversidad genética especialmente en regiones meridionales, y como estas son más diversas que regiones septrentionales, donde llegó solo una parte de la información genética por una expansión de borde de avance (leading-edge expansion) desde los refugios glaciares del sur.
+
+## Parte 7. Comparar cobertura geográfica: iNaturalist vs. GenBank
+
+Una pregunta importante en bioinformática es **¿qué tan representativos son los datos disponibles?** Comparemos dónde tenemos datos de distribución vs. dónde tenemos datos genéticos:
+
+```{r}
+# Convertir a objetos espaciales
+inat_sf <- st_as_sf(data_rt_limpio,
+                    coords = c("decimalLongitude", "decimalLatitude"),
+                    crs = 4326)
+
+genbank_sf <- st_as_sf(metadatos_rt_coord,
+                       coords = c("lon", "lat"),
+                       crs = 4326)
+
+# Mapa de comparación
+p6 <- ggplot() +
+  geom_sf(data = mundo, fill = "grey90", color = "grey60", size = 0.3) +
+  geom_sf(data = inat_sf, color = "#00B4D8", size = 1, alpha = 0.3,
+          aes(shape = "iNaturalist")) +
+  geom_sf(data = genbank_sf, color = "#EF233C", size = 2.5,
+          aes(shape = "GenBank")) +
+  scale_shape_manual(
+    values = c("iNaturalist" = 16, "GenBank" = 17),
+    name = "Fuente"
+  ) +
+  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
+           ylim = c(bbox["ymin"], bbox["ymax"])) +
+  labs(x = "Longitud", y = "Latitud",
+    caption = paste("iNaturalist:", nrow(data_rt_limpio),
+                    "registros | GenBank:", nrow(metadatos_rt_coord), 
+                    "secuencias con coords")) +
+  theme_bw(base_size = 13)
+
+p6
+ggsave("figures/comparacion_fuentes.png", p6, width = 10, height = 7, dpi = 300)
+```
+
+```{r}
+p7 <- datos_analisis2 %>%
+  mutate(region = case_when(
+    celda_lon < -5 & celda_lat >= 50 ~ "Reino Unido / Irlanda",
+    celda_lon >= -5 & celda_lat < 48 ~ "Europa central-sur",
+    TRUE ~ "Europa central-norte")) %>%
+  group_by(region) %>%
+  summarise(pi_media = mean(pi, na.rm = TRUE),
+            n_total  = sum(n_seqs)) %>%
+  ggplot(aes(x = reorder(region, -pi_media), y = pi_media, fill = region)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = paste0("n=", n_total)), vjust = -0.5) +
+  labs(x = "Región", y = "π promedio",
+       title = "Diversidad nucleotídica por región geográfica") +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "none")
+p7
+ggsave("figures/comparacion_region.png", p6, width = 10, height = 7, dpi = 300)
+```
+
+## Discusión
+
+La diversidad nucleotídica difirió de forma marcada entre regiones, siendo notablemente mayor en Europa central-sur (π ≈ 0,014; n = 161) que en Reino Unido e Irlanda (π ≈ 0,001; n = 6) y en Europa central-norte (π ≈ 0,0005; n = 33). Esta diferencia entre el sur y el norte es coherente con la hipótesis de los refugios glaciares en el borde del rango y coincide con los valores reportados por Stefani et al. (2012), quienes documentaron π = 0,010 ± 0,006 para las poblaciones meridionales frente a π = 0,002 ± 0,002 para el resto de las poblaciones europeas del linaje occidental.
+
+El gradiente latitudinal refuerza esta interpretación. La pendiente negativa entre la latitud absoluta y la diversidad nucleotídica indica que las poblaciones más cercanas a los refugios pleistocénicos del sur conservan una mayor variabilidad genética, mientras que las poblaciones más septentrionales presentan una diversidad reducida. La explicación de este patrón es la expansión de borde de avance (leading-edge expansion) descrita por Stefani et al. (2012), en la que la recolonización postglacial hacia el norte ocurrió a partir de un subconjunto progresivamente menor de la variabilidad original, generando efectos fundadores sucesivos que erosionaron la diversidad genética a medida que la especie avanzaba hacia latitudes más altas. Las poblaciones británicas, al haber sido colonizadas en último término tras el retiro de los hielos, representan el extremo de menor diversidad de ese gradiente.
+
+Las densidades de datos entre genbank y inaturalist no tienen relación directa, mientras uno representa donde hay más disposición de la gente de estar actualizando observaciones, mientras que genbank interpreta donde hay interés de estudios filogéneticos. En Italia hay un interés de estudio sobre la variabilidad genética a través de los alpes (Stefani, et al, 2012), mientras que en España se realizaron estudios donde se demostró la alta variabilidad genética en dos poblaciones diferentes (Dufresnes, et al. 2020), una con la presencia de la especie *Rana parvipalmata* en zonas como Galicia y Asturias, y otra zona exclusiva de la *Rana temporaria*, en las montañas de Cantabria. Y en Reino Unido, se han encontrado poblaciones con haplotipos de tanto el este, como el oeste de europa (Teacher,et al. 2009).
+
+La comparación de cobertura geográfica entre iNaturalist y GenBank ilustra adicionalmente las limitaciones estructurales del estudio. Mientras iNaturalist documenta 1.790 registros distribuidos de forma relativamente continua por toda Europa occidental y central, GenBank concentra apenas 201 secuencias con coordenadas en cuatro núcleos puntuales: el norte de España, los Pirineos franceses, los Alpes suizos y Escocia. Esta cobertura fragmentada reproduce el sesgo histórico de la investigación filogeográfica de la especie, focalizada precisamente en los refugios glaciares y en las islas británicas (Stefani et al., 2012), e implica que el análisis no captura información de regiones biogeográficamente relevantes como los Balcanes, Escandinavia o Europa oriental. En conjunto, los resultados son consistentes con la hipótesis planteada: las poblaciones del sur europeo presentan una diversidad genética sustancialmente mayor que las del norte, en concordancia con su rol como refugios pleistocénicos. La diferencia España-Reino Unido no se explica por la cantidad de observaciones disponibles en cada región, sino por la historia filogeográfica de la especie, en la que los procesos de expansión postglacial moldearon la distribución actual de la diversidad genética.
+
+Conclusiones
+
+-   La diversidad nucleotídica de Rana temporaria varía marcadamente entre regiones europeas, siendo aproximadamente un orden de magnitud mayor en las poblaciones meridionales (Europa central-sur, π ≈ 0,014) que en las poblaciones septentrionales (Reino Unido, π ≈ 0,001).
+
+-   Se válido la hipótesis de los refugios glaciares en el borde del rango, según la cual las poblaciones del sur europeo conservaron la variabilidad genética ancestral durante el Pleistoceno y la recolonización postglacial hacia el norte erosionó esa diversidad mediante efectos fundadores sucesivos.
+
+-   La ausencia de correlación entre la densidad de registros de iNaturalist y la diversidad genética demuestra que ambas fuentes de información son diferentes: la ciencia ciudadana refleja la distribución de observadores humanos, mientras que la diversidad genética refleja procesos evolutivos profundos.
+
+-   En conclusión, la diferencia observada entre España y Reino Unido se explica por la historia filogeográfica de la especie y no por diferencias en el esfuerzo de muestreo entre ambas regiones.
+
+## Referencias
+
+Stefani, F., Gentilli, A., Sacchi, R., Razzetti, E., Pellitteri-Rosa, D., Pupin, F., & Galli, P. (2012). Refugia within refugia as a key to disentangle the genetic pattern of a highly variable species: The case of Rana temporaria Linnaeus, 1758 (Anura, Ranidae). Molecular Phylogenetics and Evolution, 65(1), 718–726. <https://doi.org/10.1016/j.ympev.2012.07.022>
+
+Dufresnes C, Nicieza AG, Litvinchuk SN, Rodrigues N, Jeffries DL, Vences M, Perrin N, Martínez-Solano Í. Are glacial refugia hotspots of speciation and cytonuclear discordances? Answers from the genomic phylogeography of Spanish common frogs. Mol Ecol. 2020 Mar;29(5):986-1000. doi: 10.1111/mec.15368. Epub 2020 Feb 18. PMID: 32012388.
+
+Teacher, A. G. F., Garner, T. W. J., & Nichols, R. A. (2009). European phylogeography of the common frog (Rana temporaria): routes of postglacial colonization into the British Isles, and evidence for an Irish glacial refugium. Heredity, 102(5), 490–496. <https://doi.org/10.1038/hdy.2008.133>
+
+## Parte 8. Actualizar el repositorio en GitHub
+
+Revisar sus archivos generados antes de hacer el push:
+
+```{r}
+# Verificar que los archivos están en su lugar
+list.files("data/")
+list.files("output/")
+list.files("figures/")
+```
